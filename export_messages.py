@@ -14,6 +14,7 @@ Usage:
 
 import sqlite3
 import os
+import re
 import sys
 import hashlib
 import argparse
@@ -167,6 +168,13 @@ def format_message(row, is_group, contacts):
     sender = ""
     body = content or ""
 
+    # Handle bytes content (e.g. zstd compressed)
+    if isinstance(body, bytes):
+        try:
+            body = body.decode("utf-8", errors="replace")
+        except Exception:
+            body = "(binary content)"
+
     if is_group and body and ":\n" in body:
         parts = body.split(":\n", 1)
         raw_sender = parts[0]
@@ -275,23 +283,44 @@ def export_chat(msg_dbs, username, contacts, limit=None):
         conn.close()
 
 
-def export_to_file(msg_dbs, username, output_path, contacts, limit=None):
-    """Export messages to a text file."""
+def safe_filename(display_name, username):
+    """Generate a safe filename from display name, fallback to username."""
+    name = display_name or username
+    # Remove characters not safe for filenames
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', name)
+    name = name.strip('. ')
+    if not name:
+        name = username.replace('@', '_at_')
+    # Truncate to reasonable length
+    if len(name) > 80:
+        name = name[:80]
+    return name
+
+
+def export_to_file(msg_dbs, username, output_dir, contacts, limit=None):
+    """Export messages to a text file named by display name."""
     lines, info = export_chat(msg_dbs, username, contacts, limit)
     if lines is None:
         return False, info
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
-    display_name = contacts.get(username, username)
+    display_name = contacts.get(username, "")
+    fname = safe_filename(display_name, username)
+    output_path = os.path.join(output_dir, f"{fname}.txt")
+
+    # Avoid collision
+    if os.path.exists(output_path):
+        output_path = os.path.join(output_dir, f"{fname}_{username.replace('@', '_at_')}.txt")
+
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write(f"# Chat: {display_name} ({username})\n")
+        f.write(f"# Chat: {display_name or username} ({username})\n")
         f.write(f"# {info}\n")
         f.write(f"# Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         f.write("\n".join(lines))
         f.write("\n")
 
-    return True, info
+    return True, f"{os.path.basename(output_path)} | {info}"
 
 
 def main():
@@ -380,10 +409,8 @@ def main():
         for line in lines:
             print(line)
 
-        safe_name = username.replace("@", "_at_")
-        out_path = os.path.join(args.output, f"{safe_name}.txt")
-        export_to_file(msg_dbs, username, out_path, contacts, args.limit)
-        print(f"\n[*] Saved to {out_path}")
+        success, result_info = export_to_file(msg_dbs, username, args.output, contacts, args.limit)
+        print(f"\n[*] Saved: {result_info}")
 
     elif args.all:
         # Export all conversations
@@ -393,10 +420,8 @@ def main():
         for c in convos:
             if not c["has_msgs"]:
                 continue
-            safe_name = c["username"].replace("@", "_at_")
-            out_path = os.path.join(args.output, f"{safe_name}.txt")
             success, info = export_to_file(
-                msg_dbs, c["username"], out_path, contacts, args.limit,
+                msg_dbs, c["username"], args.output, contacts, args.limit,
             )
             if success:
                 print(f"  ✅ {info}")
