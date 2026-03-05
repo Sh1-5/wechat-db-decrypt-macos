@@ -73,16 +73,24 @@ def load_contacts(decrypted_dir):
     return contacts
 
 
-def load_chatroom_members(decrypted_dir):
-    """Load chatroom member mappings from contact.db.
-    Returns a set of member user_ids that are linked to usernames.
-    """
-    contact_db = os.path.join(decrypted_dir, "contact", "contact.db")
-    if not os.path.isfile(contact_db):
-        return {}
-    # We don't need explicit member mapping - group messages contain
-    # sender username in message_content as "sender:\nmessage"
-    return {}
+def resolve_username(chat_name, contacts):
+    """Resolve chat_name (display name, remark, or wxid) to username."""
+    # Direct match
+    if chat_name in contacts or chat_name.startswith("wxid_") or "@chatroom" in chat_name:
+        return chat_name
+
+    # Exact match on display name
+    chat_lower = chat_name.lower()
+    for uname, display in contacts.items():
+        if chat_lower == display.lower():
+            return uname
+
+    # Fuzzy match (contains)
+    for uname, display in contacts.items():
+        if chat_lower in display.lower():
+            return uname
+
+    return None
 
 
 # ── Multi-database support ───────────────────────────────────────────────────
@@ -352,8 +360,18 @@ def main():
         print(f"[*] Found {found} messages matching '{args.search}'")
 
     elif args.chat:
-        # Export specific chat
-        lines, info = export_chat(msg_dbs, args.chat, contacts, args.limit)
+        # Export specific chat (with fuzzy matching)
+        username = resolve_username(args.chat, contacts)
+        if not username:
+            print(f"[-] Could not find chat: {args.chat}")
+            print(f"    Try: python3 export_messages.py -s '{args.chat}'")
+            sys.exit(1)
+
+        if username != args.chat:
+            display = contacts.get(username, username)
+            print(f"[*] Matched '{args.chat}' -> {display} ({username})")
+
+        lines, info = export_chat(msg_dbs, username, contacts, args.limit)
         if lines is None:
             print(f"[-] {info}")
             sys.exit(1)
@@ -362,9 +380,9 @@ def main():
         for line in lines:
             print(line)
 
-        safe_name = args.chat.replace("@", "_at_")
+        safe_name = username.replace("@", "_at_")
         out_path = os.path.join(args.output, f"{safe_name}.txt")
-        export_to_file(msg_dbs, args.chat, out_path, contacts, args.limit)
+        export_to_file(msg_dbs, username, out_path, contacts, args.limit)
         print(f"\n[*] Saved to {out_path}")
 
     elif args.all:
