@@ -339,12 +339,14 @@ def get_recent_sessions(limit: int = 20) -> str:
 
 
 @mcp.tool()
-def get_chat_history(chat_name: str, limit: int = 50) -> str:
-    """获取指定聊天的消息记录。支持模糊匹配联系人名/备注名。
+def get_chat_history(chat_name: str, limit: int = 50, start_date: str = "", end_date: str = "") -> str:
+    """获取指定聊天的消息记录。支持模糊匹配联系人名/备注名，支持按日期范围筛选。
 
     Args:
         chat_name: 聊天对象的名字、备注名或wxid，自动模糊匹配
         limit: 返回的消息数量，默认50
+        start_date: 起始日期（含），格式 YYYY-MM-DD 或 YYYY-MM-DD HH:MM，留空不限
+        end_date: 结束日期（含），格式 YYYY-MM-DD 或 YYYY-MM-DD HH:MM，留空不限
     """
     _auto_sync()
     username = _resolve_username(chat_name)
@@ -359,19 +361,62 @@ def get_chat_history(chat_name: str, limit: int = 50) -> str:
     if not db_path:
         return f"找不到 {display_name} 的消息记录"
 
+    # Build time filter
+    conditions = []
+    params = []
+    if start_date:
+        try:
+            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    ts = int(datetime.strptime(start_date, fmt).timestamp())
+                    break
+                except ValueError:
+                    continue
+            else:
+                return f"日期格式错误: {start_date}，请用 YYYY-MM-DD 或 YYYY-MM-DD HH:MM"
+            conditions.append("create_time >= ?")
+            params.append(ts)
+        except Exception:
+            return f"日期格式错误: {start_date}，请用 YYYY-MM-DD 或 YYYY-MM-DD HH:MM"
+    if end_date:
+        try:
+            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    dt = datetime.strptime(end_date, fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                return f"日期格式错误: {end_date}，请用 YYYY-MM-DD 或 YYYY-MM-DD HH:MM"
+            # If only date given, include the entire day
+            if len(end_date) <= 10:
+                dt = dt.replace(hour=23, minute=59, second=59)
+            ts = int(dt.timestamp())
+            conditions.append("create_time <= ?")
+            params.append(ts)
+        except Exception:
+            return f"日期格式错误: {end_date}，请用 YYYY-MM-DD 或 YYYY-MM-DD HH:MM"
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    params.append(limit)
+
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute(f"""
             SELECT local_type, create_time, message_content
             FROM [{table_name}]
+            {where}
             ORDER BY create_time DESC
             LIMIT ?
-        """, (limit,)).fetchall()
+        """, params).fetchall()
     finally:
         conn.close()
 
     if not rows:
-        return f"{display_name} 无消息记录"
+        msg = f"{display_name} 无消息记录"
+        if start_date or end_date:
+            msg += f"（{start_date or '...'} ~ {end_date or '...'}）"
+        return msg
 
     lines = []
     for local_type, create_time, content in reversed(rows):
@@ -379,7 +424,9 @@ def get_chat_history(chat_name: str, limit: int = 50) -> str:
         text = _parse_message(content, local_type, is_group, names)
         lines.append(f"[{time_str}] {text}")
 
-    header = f"{display_name} 的最近 {len(lines)} 条消息"
+    header = f"{display_name} 的 {len(lines)} 条消息"
+    if start_date or end_date:
+        header += f"（{start_date or '...'} ~ {end_date or '...'}）"
     if is_group:
         header += " [群聊]"
     return header + ":\n\n" + "\n".join(lines)
