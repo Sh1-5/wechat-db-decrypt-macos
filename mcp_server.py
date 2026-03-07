@@ -19,6 +19,8 @@ import sqlite3
 import os
 import re
 import hashlib
+import json
+import time
 from datetime import datetime
 
 from fastmcp import FastMCP
@@ -27,12 +29,101 @@ from fastmcp import FastMCP
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DECRYPTED_DIR = os.path.join(SCRIPT_DIR, "decrypted")
+KEYS_FILE = os.path.join(SCRIPT_DIR, "wechat_keys.json")
+SYNC_COOLDOWN = 60  # seconds between auto-syncs
+
+_last_sync_time = 0
 
 MSG_TYPE_MAP = {
     1: "文本", 3: "图片", 34: "语音", 42: "名片",
     43: "视频", 47: "表情", 48: "位置", 49: "链接/文件",
     50: "通话", 10000: "系统", 10002: "撤回",
 }
+
+
+# ── Auto-sync ────────────────────────────────────────────────────────────────
+
+
+def _find_db_dir():
+    """Find WeChat's encrypted db_storage directory."""
+    import glob as _glob
+    base = os.path.expanduser(
+        "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
+    )
+    candidates = _glob.glob(os.path.join(base, "*", "db_storage"))
+    return candidates[0] if candidates else None
+
+
+def _find_sqlcipher():
+    brew_path = "/opt/homebrew/opt/sqlcipher/bin/sqlcipher"
+    if os.path.isfile(brew_path):
+        return brew_path
+    for p in os.environ.get("PATH", "").split(":"):
+        c = os.path.join(p, "sqlcipher")
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def _decrypt_one(sqlcipher_bin, src, dst, key_hex):
+    """Decrypt a single SQLCipher database."""
+    import subprocess
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if os.path.exists(dst):
+        os.remove(dst)
+    sql = f"""PRAGMA key = "x'{key_hex}'";
+PRAGMA cipher_page_size = 4096;
+ATTACH DATABASE '{dst}' AS plaintext KEY '';
+SELECT sqlcipher_export('plaintext');
+DETACH DATABASE plaintext;
+"""
+    try:
+        r = subprocess.run(
+            [sqlcipher_bin, src], input=sql,
+            capture_output=True, text=True, timeout=120,
+        )
+        return r.returncode == 0 and os.path.isfile(dst) and os.path.getsize(dst) > 0
+    except Exception:
+        return False
+
+
+def _auto_sync(force=False):
+    """Re-decrypt only databases whose source file has changed. Clears contact cache if any DB was updated."""
+    global _last_sync_time, _contacts, _contacts_full
+
+    now = time.time()
+    if not force and (now - _last_sync_time) < SYNC_COOLDOWN:
+        return
+
+    if not os.path.isfile(KEYS_FILE):
+        return
+
+    sqlcipher_bin = _find_sqlcipher()
+    db_dir = _find_db_dir()
+    if not sqlcipher_bin or not db_dir:
+        return
+
+    with open(KEYS_FILE) as f:
+        keys = json.load(f)
+
+    updated = False
+    for db_rel, key_hex in keys.items():
+        if db_rel.startswith("__"):
+            continue
+        src = os.path.join(db_dir, db_rel)
+        dst = os.path.join(DECRYPTED_DIR, db_rel)
+        if not os.path.isfile(src):
+            continue
+        # Skip if decrypted file is newer than source
+        if not force and os.path.isfile(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
+            continue
+        if _decrypt_one(sqlcipher_bin, src, dst, key_hex):
+            updated = True
+
+    if updated:
+        _contacts = None
+        _contacts_full = None
+    _last_sync_time = time.time()
 
 
 # ── Database helpers ─────────────────────────────────────────────────────────
@@ -182,7 +273,16 @@ def _parse_message(content, local_type, is_group, names):
 
 # ── MCP Server ───────────────────────────────────────────────────────────────
 
-mcp = FastMCP("wechat", instructions="查询微信消息、联系人等数据。需要先运行 decrypt_db.py 解密数据库。")
+mcp = FastMCP("wechat", instructions="查询微信消息、联系人等数据。数据库会自动同步最新聊天记录（每60秒）。")
+
+
+@mcp.tool()
+def sync() -> str:
+    """手动同步微信数据库，获取最新聊天记录。
+    通常不需要手动调用，查询时会自动同步（每60秒）。
+    """
+    _auto_sync(force=True)
+    return "同步完成，数据库已更新为最新状态。"
 
 
 @mcp.tool()
@@ -193,6 +293,7 @@ def get_recent_sessions(limit: int = 20) -> str:
     Args:
         limit: 返回的会话数量，默认20
     """
+    _auto_sync()
     db = _get_session_db()
     if not os.path.isfile(db):
         return "错误: session.db 未找到，请先运行 python3 decrypt_db.py"
@@ -245,6 +346,7 @@ def get_chat_history(chat_name: str, limit: int = 50) -> str:
         chat_name: 聊天对象的名字、备注名或wxid，自动模糊匹配
         limit: 返回的消息数量，默认50
     """
+    _auto_sync()
     username = _resolve_username(chat_name)
     if not username:
         return f"找不到聊天对象: {chat_name}\n提示: 用 get_contacts(query='{chat_name}') 搜索联系人"
@@ -291,6 +393,7 @@ def search_messages(keyword: str, limit: int = 20) -> str:
         keyword: 搜索关键词
         limit: 返回的结果数量，默认20
     """
+    _auto_sync()
     if not keyword:
         return "请提供搜索关键词"
 
@@ -361,6 +464,7 @@ def get_contacts(query: str = "", limit: int = 50) -> str:
         query: 搜索关键词（匹配昵称、备注名、wxid），留空列出所有
         limit: 返回数量，默认50
     """
+    _auto_sync()
     _load_contacts()
     contacts = _contacts_full or []
 
