@@ -3,9 +3,13 @@
 __pycache__
 *.pyc
 
-# Sensitive data
+# Sensitive data - encryption keys
 wechat_keys.json
 wechat_keys*.json
+all_keys.json
+
+# Compiled binaries
+find_all_keys_macos
 
 # Output directories
 decrypted/

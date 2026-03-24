@@ -51,7 +51,12 @@ def _find_db_dir():
         "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
     )
     candidates = _glob.glob(os.path.join(base, "*", "db_storage"))
-    return candidates[0] if candidates else None
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    # Multiple accounts: pick the one modified most recently
+    return max(candidates, key=lambda p: os.path.getmtime(p))
 
 
 def _find_sqlcipher():
