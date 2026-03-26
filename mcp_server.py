@@ -30,6 +30,7 @@ from fastmcp import FastMCP
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DECRYPTED_DIR = os.path.join(SCRIPT_DIR, "decrypted")
 KEYS_FILE = os.path.join(SCRIPT_DIR, "wechat_keys.json")
+ALL_KEYS_FILE = os.path.join(SCRIPT_DIR, "all_keys.json")
 SYNC_COOLDOWN = 60  # seconds between auto-syncs
 
 _last_sync_time = 0
@@ -92,6 +93,52 @@ DETACH DATABASE plaintext;
         return False
 
 
+def _load_keys():
+    """Load keys from wechat_keys.json, merge with all_keys.json if it exists."""
+    keys = {}
+    if os.path.isfile(KEYS_FILE):
+        with open(KEYS_FILE) as f:
+            keys = json.load(f)
+    if os.path.isfile(ALL_KEYS_FILE):
+        with open(ALL_KEYS_FILE) as f:
+            all_keys = json.load(f)
+        for db_rel, val in all_keys.items():
+            key_hex = val.get("enc_key", val) if isinstance(val, dict) else val
+            if db_rel not in keys:
+                keys[db_rel] = key_hex
+    return keys
+
+
+def _find_unkeyed_dbs(db_dir, keys):
+    """Find encrypted .db files in db_dir that have no key."""
+    import glob as _glob
+    unkeyed = []
+    for path in _glob.glob(os.path.join(db_dir, "**", "*.db"), recursive=True):
+        rel = os.path.relpath(path, db_dir)
+        if rel not in keys:
+            unkeyed.append(rel)
+    return unkeyed
+
+
+def _refresh_keys():
+    """Re-extract WeChat encryption keys from memory using find_all_keys_macos."""
+    import subprocess
+    key_tool = os.path.join(SCRIPT_DIR, "find_all_keys_macos")
+    if not os.path.isfile(key_tool):
+        return False
+    # Try without sudo first, then with passwordless sudo
+    for cmd in [[key_tool], ["sudo", "-n", key_tool]]:
+        try:
+            r = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30, cwd=SCRIPT_DIR,
+            )
+            if r.returncode == 0 and os.path.isfile(ALL_KEYS_FILE):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _auto_sync(force=False):
     """Re-decrypt only databases whose source file has changed. Clears contact cache if any DB was updated."""
     global _last_sync_time, _contacts, _contacts_full
@@ -100,16 +147,20 @@ def _auto_sync(force=False):
     if not force and (now - _last_sync_time) < SYNC_COOLDOWN:
         return
 
-    if not os.path.isfile(KEYS_FILE):
-        return
-
     sqlcipher_bin = _find_sqlcipher()
     db_dir = _find_db_dir()
     if not sqlcipher_bin or not db_dir:
         return
 
-    with open(KEYS_FILE) as f:
-        keys = json.load(f)
+    keys = _load_keys()
+    if not keys:
+        return
+
+    # Detect new db files without keys and auto-refresh
+    unkeyed = _find_unkeyed_dbs(db_dir, keys)
+    if unkeyed:
+        if _refresh_keys():
+            keys = _load_keys()
 
     updated = False
     for db_rel, key_hex in keys.items():

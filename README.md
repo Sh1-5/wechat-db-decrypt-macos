@@ -15,10 +15,14 @@
 确保微信已登录并正在运行：
 
 ```bash
+# 推荐：C 版，速度快，输出到 all_keys.json
+sudo ./find_all_keys_macos
+
+# 备选：Python 版，需要 lldb，输出到 wechat_keys.json
 PYTHONPATH=$(lldb -P) python3 find_key_memscan.py
 ```
 
-密钥保存到 `wechat_keys.json`。
+> **注意**：微信会自动分库（如 `message_0.db` → `message_1.db`），新库需要重新提取密钥。MCP Server 同时读取 `wechat_keys.json` 和 `all_keys.json`。
 
 ### 3. 解密数据库
 
@@ -54,6 +58,12 @@ python3 export_messages.py --all
 ```bash
 pip3 install fastmcp
 claude mcp add wechat -- python3 $(pwd)/mcp_server.py
+```
+
+**（可选）自动刷新密钥**：配置免密 sudo 后，MCP Server 在同步时如果检测到新的数据库分片，会自动提取密钥，无需手动操作：
+
+```bash
+echo "$USER ALL=(root) NOPASSWD: $(pwd)/find_all_keys_macos" | sudo tee /etc/sudoers.d/wechat-keys
 ```
 
 注册后 AI 可以直接调用以下能力：
